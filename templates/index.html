@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure File Share</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .section {
+            margin-bottom: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .hidden {
+            display: none;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        input[type="file"], input[type="text"] {
+            padding: 8px;
+            margin: 10px 0;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        #message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Secure File Share</h1>
+        
+        <div class="section" id="upload-section">
+            <h2>Upload File</h2>
+            <input type="file" id="file-input">
+            <button onclick="uploadFile()">Upload</button>
+            <div id="upload-message"></div>
+        </div>
+
+        <div class="section" id="verify-section">
+            <h2>Download File</h2>
+            <input type="text" id="otp-input" placeholder="Enter OTP">
+            <button onclick="verifyOTP()">Verify</button>
+            <div id="verify-message"></div>
+        </div>
+    </div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById('file-input');
+            const messageDiv = document.getElementById('upload-message');
+            
+            if (!fileInput.files.length) {
+                showMessage(messageDiv, 'Please select a file', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showMessage(messageDiv, `File uploaded successfully! Your OTP is: ${data.otp}`, 'success');
+                    fileInput.value = '';
+                } else {
+                    showMessage(messageDiv, data.error, 'error');
+                }
+            } catch (error) {
+                showMessage(messageDiv, 'Error uploading file', 'error');
+            }
+        }
+
+        async function verifyOTP() {
+            const otpInput = document.getElementById('otp-input');
+            const messageDiv = document.getElementById('verify-message');
+            
+            if (!otpInput.value) {
+                showMessage(messageDiv, 'Please enter OTP', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/verify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ otp: otpInput.value })
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showMessage(messageDiv, 'OTP verified successfully!', 'success');
+                    window.location.href = data.download_url;
+                    otpInput.value = '';
+                } else {
+                    showMessage(messageDiv, data.error, 'error');
+                }
+            } catch (error) {
+                showMessage(messageDiv, 'Error verifying OTP', 'error');
+            }
+        }
+
+        function showMessage(element, message, type) {
+            element.textContent = message;
+            element.className = type;
+        }
+    </script>
+</body>
+</html> 
