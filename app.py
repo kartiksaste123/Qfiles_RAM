@@ -4,6 +4,10 @@ import secrets
 from datetime import datetime, timedelta
 import os
 import logging
+import eventlet
+
+# Patch eventlet
+eventlet.monkey_patch()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -12,7 +16,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key')
 app.config['SESSION_TYPE'] = 'filesystem'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True, ping_timeout=60, ping_interval=25)
 
 # Store only OTP and metadata, not the actual file
 # Structure: {otp: {'filename': filename, 'size': size, 'type': type, 'expiry': expiry_time}}
