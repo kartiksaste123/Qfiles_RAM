@@ -117,8 +117,14 @@
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' }
-            ]
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' }
+            ],
+            iceCandidatePoolSize: 10,
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
+            iceTransportPolicy: 'all'
         };
 
         // Initialize socket connection
@@ -127,10 +133,18 @@
                 socket.disconnect();
             }
             
+            // Get the current hostname and protocol
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            
             socket = io({
                 reconnection: true,
                 reconnectionAttempts: 5,
-                reconnectionDelay: 1000
+                reconnectionDelay: 1000,
+                transports: ['websocket', 'polling'],
+                path: '/socket.io/',
+                // Use the current host to ensure it works in all environments
+                url: `${protocol}//${host}`
             });
             
             socket.on('connect', () => {
@@ -146,6 +160,14 @@
                 isConnected = false;
                 updateStatus('share-status', 'Disconnected from server', 'error');
                 updateStatus('receive-status', 'Disconnected from server', 'error');
+                
+                // Try to reconnect
+                setTimeout(() => {
+                    if (!isConnected) {
+                        console.log('Attempting to reconnect...');
+                        initSocket();
+                    }
+                }, 3000);
             });
             
             socket.on('connect_error', (error) => {
@@ -163,6 +185,12 @@
                 if (data.otp === currentOTP) {
                     updateStatus('receive-status', 'Connection established', 'success');
                 }
+            });
+            
+            socket.on('error', (data) => {
+                console.error('Server error:', data);
+                updateStatus('share-status', `Server error: ${data.message}`, 'error');
+                updateStatus('receive-status', `Server error: ${data.message}`, 'error');
             });
             
             socket.on('offer', async (data) => {
@@ -370,8 +398,36 @@
         function sendFile() {
             const reader = new FileReader();
             reader.onload = () => {
-                dataChannel.send(reader.result);
-                updateStatus('share-status', 'File sent successfully', 'success');
+                try {
+                    // Split the file into chunks if it's large
+                    const chunkSize = 16384; // 16KB chunks
+                    const fileData = reader.result;
+                    const totalChunks = Math.ceil(fileData.byteLength / chunkSize);
+                    
+                    // Send file metadata first
+                    dataChannel.send(JSON.stringify({
+                        type: 'metadata',
+                        filename: fileToShare.name,
+                        size: fileToShare.size,
+                        mimeType: fileToShare.type,
+                        totalChunks: totalChunks
+                    }));
+                    
+                    // Send file chunks
+                    for (let i = 0; i < totalChunks; i++) {
+                        const start = i * chunkSize;
+                        const end = Math.min(start + chunkSize, fileData.byteLength);
+                        const chunk = fileData.slice(start, end);
+                        
+                        dataChannel.send(chunk);
+                        updateStatus('share-status', `Sending file: ${Math.round((i + 1) / totalChunks * 100)}%`, 'success');
+                    }
+                    
+                    updateStatus('share-status', 'File sent successfully', 'success');
+                } catch (error) {
+                    console.error('Error sending file:', error);
+                    updateStatus('share-status', 'Error sending file: ' + error.message, 'error');
+                }
             };
             reader.onerror = () => {
                 updateStatus('share-status', 'Error reading file', 'error');
@@ -380,16 +436,66 @@
         }
 
         function receiveFile(data) {
-            const blob = new Blob([data]);
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'received-file';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            updateStatus('receive-status', 'File received successfully', 'success');
+            try {
+                if (typeof data === 'string') {
+                    // This is metadata
+                    const metadata = JSON.parse(data);
+                    if (metadata.type === 'metadata') {
+                        // Initialize file receiving
+                        window.receivedChunks = [];
+                        window.expectedChunks = metadata.totalChunks;
+                        window.fileName = metadata.filename;
+                        window.fileSize = metadata.size;
+                        window.mimeType = metadata.mimeType;
+                        window.receivedChunkCount = 0;
+                        
+                        // Show progress bar
+                        document.getElementById('progress').classList.remove('hidden');
+                        document.getElementById('progress-bar').style.width = '0%';
+                        updateStatus('receive-status', 'Receiving file...', 'success');
+                    }
+                } else {
+                    // This is a file chunk
+                    window.receivedChunks.push(data);
+                    window.receivedChunkCount++;
+                    
+                    // Update progress
+                    const progress = Math.round((window.receivedChunkCount / window.expectedChunks) * 100);
+                    document.getElementById('progress-bar').style.width = `${progress}%`;
+                    updateStatus('receive-status', `Receiving file: ${progress}%`, 'success');
+                    
+                    // Check if we've received all chunks
+                    if (window.receivedChunkCount === window.expectedChunks) {
+                        // Combine chunks and create download
+                        const blob = new Blob(window.receivedChunks, { type: window.mimeType });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = window.fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        
+                        // Reset progress bar
+                        document.getElementById('progress').classList.add('hidden');
+                        document.getElementById('progress-bar').style.width = '0%';
+                        
+                        // Clean up
+                        window.receivedChunks = null;
+                        window.expectedChunks = null;
+                        window.fileName = null;
+                        window.fileSize = null;
+                        window.mimeType = null;
+                        window.receivedChunkCount = 0;
+                        
+                        updateStatus('receive-status', 'File received successfully', 'success');
+                    }
+                }
+            } catch (error) {
+                console.error('Error receiving file:', error);
+                updateStatus('receive-status', 'Error receiving file: ' + error.message, 'error');
+            }
         }
 
         function showMessage(element, message, type) {
