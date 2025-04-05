@@ -119,12 +119,14 @@
                 { urls: 'stun:stun1.l.google.com:19302' },
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
+                { urls: 'stun:stun4.l.google.com:19302' },
+                { urls: 'stun:stun.stunprotocol.org:3478' }
             ],
             iceCandidatePoolSize: 10,
             bundlePolicy: 'max-bundle',
             rtcpMuxPolicy: 'require',
-            iceTransportPolicy: 'all'
+            iceTransportPolicy: 'all',
+            iceConnectionTimeout: 10000
         };
 
         // Initialize socket connection
@@ -139,9 +141,11 @@
             
             socket = io({
                 reconnection: true,
-                reconnectionAttempts: 5,
+                reconnectionAttempts: 10,
                 reconnectionDelay: 1000,
-                transports: ['websocket', 'polling'],
+                reconnectionDelayMax: 5000,
+                timeout: 20000,
+                transports: ['websocket'],
                 path: '/socket.io/',
                 // Use the current host to ensure it works in all environments
                 url: `${protocol}//${host}`
@@ -327,7 +331,10 @@
             peerConnection = new RTCPeerConnection(configuration);
             
             if (isSender) {
-                dataChannel = peerConnection.createDataChannel('fileTransfer');
+                dataChannel = peerConnection.createDataChannel('fileTransfer', {
+                    ordered: true,
+                    maxRetransmits: 3
+                });
                 setupDataChannel(dataChannel);
             } else {
                 peerConnection.ondatachannel = (event) => {
@@ -351,6 +358,26 @@
                     updateStatus('share-status', `Connection state: ${peerConnection.connectionState}`, 'success');
                 } else {
                     updateStatus('receive-status', `Connection state: ${peerConnection.connectionState}`, 'success');
+                }
+                
+                // Handle connection failures
+                if (peerConnection.connectionState === 'failed' || 
+                    peerConnection.connectionState === 'disconnected' || 
+                    peerConnection.connectionState === 'closed') {
+                    console.log('Connection failed, attempting to reconnect...');
+                    setTimeout(() => {
+                        if (peerConnection.connectionState !== 'connected') {
+                            setupPeerConnection(isSender);
+                        }
+                    }, 3000);
+                }
+            };
+            
+            peerConnection.oniceconnectionstatechange = () => {
+                console.log('ICE connection state:', peerConnection.iceConnectionState);
+                if (peerConnection.iceConnectionState === 'failed') {
+                    console.log('ICE connection failed, attempting to restart ICE...');
+                    peerConnection.restartIce();
                 }
             };
 
