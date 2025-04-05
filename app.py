@@ -6,7 +6,7 @@ import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key')
-socketio = SocketIO(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Store only OTP and metadata, not the actual file
 # Structure: {otp: {'filename': filename, 'size': size, 'type': type, 'expiry': expiry_time}}
