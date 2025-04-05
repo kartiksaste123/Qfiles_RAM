@@ -72,6 +72,10 @@
             border-radius: 4px;
             transition: width 0.3s ease-in-out;
         }
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -83,6 +87,7 @@
             <input type="file" id="file-input">
             <button onclick="createShare()">Share</button>
             <div id="share-message"></div>
+            <div id="share-status"></div>
         </div>
 
         <div class="section" id="receive-section">
@@ -90,6 +95,7 @@
             <input type="text" id="otp-input" placeholder="Enter OTP">
             <button onclick="verifyOTP()">Verify</button>
             <div id="receive-message"></div>
+            <div id="receive-status"></div>
             <div id="progress" class="hidden">
                 <div id="progress-bar"></div>
             </div>
@@ -97,18 +103,111 @@
     </div>
 
     <script>
-        const socket = io();
+        let socket;
         let peerConnection;
         let dataChannel;
         let currentOTP;
         let fileToShare;
+        let isConnected = false;
+        let connectionAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 3;
 
         // WebRTC configuration
         const configuration = {
             iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' }
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
             ]
         };
+
+        // Initialize socket connection
+        function initSocket() {
+            if (socket) {
+                socket.disconnect();
+            }
+            
+            socket = io({
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000
+            });
+            
+            socket.on('connect', () => {
+                console.log('Socket connected');
+                isConnected = true;
+                connectionAttempts = 0;
+                updateStatus('share-status', 'Connected to server', 'success');
+                updateStatus('receive-status', 'Connected to server', 'success');
+            });
+            
+            socket.on('disconnect', () => {
+                console.log('Socket disconnected');
+                isConnected = false;
+                updateStatus('share-status', 'Disconnected from server', 'error');
+                updateStatus('receive-status', 'Disconnected from server', 'error');
+            });
+            
+            socket.on('connect_error', (error) => {
+                console.error('Connection error:', error);
+                connectionAttempts++;
+                if (connectionAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                    updateStatus('share-status', 'Failed to connect to server. Please refresh the page.', 'error');
+                    updateStatus('receive-status', 'Failed to connect to server. Please refresh the page.', 'error');
+                }
+            });
+            
+            // Set up WebRTC event handlers
+            socket.on('ready', (data) => {
+                console.log('Ready signal received:', data);
+                if (data.otp === currentOTP) {
+                    updateStatus('receive-status', 'Connection established', 'success');
+                }
+            });
+            
+            socket.on('offer', async (data) => {
+                console.log('Offer received:', data);
+                if (data.otp === currentOTP) {
+                    try {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        socket.emit('answer', {
+                            otp: currentOTP,
+                            answer: answer
+                        });
+                        updateStatus('receive-status', 'Sending connection response', 'success');
+                    } catch (error) {
+                        console.error('Error handling offer:', error);
+                        updateStatus('receive-status', 'Error establishing connection', 'error');
+                    }
+                }
+            });
+            
+            socket.on('answer', async (data) => {
+                console.log('Answer received:', data);
+                if (data.otp === currentOTP) {
+                    try {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                        updateStatus('share-status', 'Connection established', 'success');
+                    } catch (error) {
+                        console.error('Error handling answer:', error);
+                        updateStatus('share-status', 'Error establishing connection', 'error');
+                    }
+                }
+            });
+            
+            socket.on('ice-candidate', (data) => {
+                console.log('ICE candidate received:', data);
+                if (data.otp === currentOTP && data.candidate) {
+                    peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
+                        .catch(error => console.error('Error adding ICE candidate:', error));
+                }
+            });
+        }
+
+        // Initialize socket on page load
+        initSocket();
 
         async function createShare() {
             const fileInput = document.getElementById('file-input');
@@ -116,6 +215,11 @@
             
             if (!fileInput.files.length) {
                 showMessage(messageDiv, 'Please select a file', 'error');
+                return;
+            }
+
+            if (!isConnected) {
+                showMessage(messageDiv, 'Not connected to server. Please refresh the page.', 'error');
                 return;
             }
 
@@ -144,7 +248,8 @@
                     showMessage(messageDiv, data.error, 'error');
                 }
             } catch (error) {
-                showMessage(messageDiv, 'Error creating share', 'error');
+                console.error('Error creating share:', error);
+                showMessage(messageDiv, 'Error creating share. Please try again.', 'error');
             }
         }
 
@@ -154,6 +259,11 @@
             
             if (!otpInput.value) {
                 showMessage(messageDiv, 'Please enter OTP', 'error');
+                return;
+            }
+
+            if (!isConnected) {
+                showMessage(messageDiv, 'Not connected to server. Please refresh the page.', 'error');
                 return;
             }
 
@@ -176,11 +286,16 @@
                     showMessage(messageDiv, data.error, 'error');
                 }
             } catch (error) {
-                showMessage(messageDiv, 'Error verifying OTP', 'error');
+                console.error('Error verifying OTP:', error);
+                showMessage(messageDiv, 'Error verifying OTP. Please try again.', 'error');
             }
         }
 
         function setupPeerConnection(isSender) {
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            
             peerConnection = new RTCPeerConnection(configuration);
             
             if (isSender) {
@@ -201,12 +316,15 @@
                     });
                 }
             };
-
-            socket.on('ice-candidate', (data) => {
-                if (data.otp === currentOTP) {
-                    peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            
+            peerConnection.onconnectionstatechange = () => {
+                console.log('Connection state:', peerConnection.connectionState);
+                if (isSender) {
+                    updateStatus('share-status', `Connection state: ${peerConnection.connectionState}`, 'success');
+                } else {
+                    updateStatus('receive-status', `Connection state: ${peerConnection.connectionState}`, 'success');
                 }
-            });
+            };
 
             if (isSender) {
                 createAndSendOffer();
@@ -217,9 +335,14 @@
 
         function setupDataChannel(channel) {
             channel.onopen = () => {
+                console.log('Data channel opened');
                 if (fileToShare) {
                     sendFile();
                 }
+            };
+
+            channel.onclose = () => {
+                console.log('Data channel closed');
             };
 
             channel.onmessage = (event) => {
@@ -237,41 +360,21 @@
                     otp: currentOTP,
                     offer: offer
                 });
+                updateStatus('share-status', 'Sending connection request', 'success');
             } catch (error) {
                 console.error('Error creating offer:', error);
+                updateStatus('share-status', 'Error creating connection request', 'error');
             }
         }
-
-        socket.on('offer', async (data) => {
-            if (data.otp === currentOTP) {
-                try {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
-                    socket.emit('answer', {
-                        otp: currentOTP,
-                        answer: answer
-                    });
-                } catch (error) {
-                    console.error('Error handling offer:', error);
-                }
-            }
-        });
-
-        socket.on('answer', async (data) => {
-            if (data.otp === currentOTP) {
-                try {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-                } catch (error) {
-                    console.error('Error handling answer:', error);
-                }
-            }
-        });
 
         function sendFile() {
             const reader = new FileReader();
             reader.onload = () => {
                 dataChannel.send(reader.result);
+                updateStatus('share-status', 'File sent successfully', 'success');
+            };
+            reader.onerror = () => {
+                updateStatus('share-status', 'Error reading file', 'error');
             };
             reader.readAsArrayBuffer(fileToShare);
         }
@@ -286,9 +389,16 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
+            updateStatus('receive-status', 'File received successfully', 'success');
         }
 
         function showMessage(element, message, type) {
+            element.textContent = message;
+            element.className = type;
+        }
+        
+        function updateStatus(elementId, message, type) {
+            const element = document.getElementById(elementId);
             element.textContent = message;
             element.className = type;
         }
