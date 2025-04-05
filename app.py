@@ -1,59 +1,39 @@
-from flask import Flask, request, render_template, send_file, jsonify
+from flask import Flask, request, render_template, jsonify
+from flask_socketio import SocketIO, emit
 import secrets
-import io
-import time
 from datetime import datetime, timedelta
 import os
-from cryptography.fernet import Fernet
-import base64
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key')
+socketio = SocketIO(app)
 
-# Generate a key for encryption (in production, this should be stored securely)
-# You should generate this once and store it securely, not generate it on each restart
-ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', Fernet.generate_key())
-fernet = Fernet(ENCRYPTION_KEY)
-
-# In-memory storage for files
-# Structure: {otp: {'encrypted_file': encrypted_file_data, 'filename': filename, 'expiry': expiry_time}}
-file_storage = {}
+# Store only OTP and metadata, not the actual file
+# Structure: {otp: {'filename': filename, 'size': size, 'type': type, 'expiry': expiry_time}}
+file_metadata = {}
 
 def generate_otp():
     return secrets.token_hex(3)  # Generates a 6-character hex string
-
-def encrypt_file(file_data):
-    """Encrypt file data using Fernet symmetric encryption"""
-    return fernet.encrypt(file_data)
-
-def decrypt_file(encrypted_data):
-    """Decrypt file data using Fernet symmetric encryption"""
-    return fernet.decrypt(encrypted_data)
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
+@app.route('/create-share', methods=['POST'])
+def create_share():
+    data = request.json
+    if not data or 'filename' not in data or 'size' not in data or 'type' not in data:
+        return jsonify({'error': 'Missing file information'}), 400
 
     # Generate OTP
     otp = generate_otp()
     
-    # Read and encrypt file data
-    file_data = file.read()
-    encrypted_data = encrypt_file(file_data)
-    
-    # Store encrypted file in memory
-    file_storage[otp] = {
-        'encrypted_file': encrypted_data,
-        'filename': file.filename,
-        'expiry': datetime.now() + timedelta(hours=24)  # Files expire after 24 hours
+    # Store only metadata
+    file_metadata[otp] = {
+        'filename': data['filename'],
+        'size': data['size'],
+        'type': data['type'],
+        'expiry': datetime.now() + timedelta(hours=24)
     }
     
     return jsonify({'otp': otp})
@@ -61,60 +41,55 @@ def upload_file():
 @app.route('/verify', methods=['POST'])
 def verify_otp():
     otp = request.json.get('otp')
-    if not otp or otp not in file_storage:
+    if not otp or otp not in file_metadata:
         return jsonify({'error': 'Invalid OTP'}), 400
     
-    file_info = file_storage[otp]
-    if datetime.now() > file_info['expiry']:
-        del file_storage[otp]
-        return jsonify({'error': 'File has expired'}), 400
+    metadata = file_metadata[otp]
+    if datetime.now() > metadata['expiry']:
+        del file_metadata[otp]
+        return jsonify({'error': 'Share has expired'}), 400
     
     return jsonify({
-        'filename': file_info['filename'],
-        'download_url': f'/download/{otp}'
+        'filename': metadata['filename'],
+        'size': metadata['size'],
+        'type': metadata['type']
     })
 
-@app.route('/download/<otp>')
-def download_file(otp):
-    if otp not in file_storage:
-        return jsonify({'error': 'Invalid OTP'}), 400
-    
-    file_info = file_storage[otp]
-    if datetime.now() > file_info['expiry']:
-        del file_storage[otp]
-        return jsonify({'error': 'File has expired'}), 400
-    
-    try:
-        # Decrypt the file data
-        decrypted_data = decrypt_file(file_info['encrypted_file'])
-        
-        # Create a BytesIO object with the decrypted data
-        file_data = io.BytesIO(decrypted_data)
-        filename = file_info['filename']
-        
-        # Delete the file from storage
-        del file_storage[otp]
-        
-        # Reset file pointer to beginning
-        file_data.seek(0)
-        return send_file(
-            file_data,
-            download_name=filename,
-            as_attachment=True
-        )
-    except Exception as e:
-        return jsonify({'error': 'Error processing file'}), 500
+# WebSocket events for signaling
+@socketio.on('join')
+def on_join(data):
+    otp = data.get('otp')
+    if otp in file_metadata:
+        emit('ready', {'otp': otp}, room=otp)
 
-# Cleanup expired files periodically
-def cleanup_expired_files():
+@socketio.on('offer')
+def on_offer(data):
+    otp = data.get('otp')
+    if otp in file_metadata:
+        emit('offer', data, room=otp)
+
+@socketio.on('answer')
+def on_answer(data):
+    otp = data.get('otp')
+    if otp in file_metadata:
+        emit('answer', data, room=otp)
+
+@socketio.on('ice-candidate')
+def on_ice_candidate(data):
+    otp = data.get('otp')
+    if otp in file_metadata:
+        emit('ice-candidate', data, room=otp)
+
+# Cleanup expired shares periodically
+def cleanup_expired_shares():
     current_time = datetime.now()
     expired_otps = [
-        otp for otp, info in file_storage.items()
+        otp for otp, info in file_metadata.items()
         if current_time > info['expiry']
     ]
     for otp in expired_otps:
-        del file_storage[otp]
+        del file_metadata[otp]
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port) 
+    socketio.run(app, host='0.0.0.0', port=port) 
