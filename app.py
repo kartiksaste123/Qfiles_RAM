@@ -1,20 +1,22 @@
 from flask import Flask, request, render_template, jsonify
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import secrets
 from datetime import datetime, timedelta
-import os
 import threading
-import time
+import os
+import eventlet
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_interval=25, ping_timeout=60)
 
-# Store only OTP and metadata, not the actual file
+# In-memory store of file metadata
 file_metadata = {}
 
 def generate_otp():
-    return secrets.token_hex(3)  # Generates a 6-character hex string (e.g. 'a1b2c3')
+    return secrets.token_hex(3)  # 6-char hex string
 
 @app.route('/')
 def index():
@@ -27,7 +29,6 @@ def create_share():
         return jsonify({'error': 'Missing file information'}), 400
 
     otp = generate_otp()
-
     file_metadata[otp] = {
         'filename': data['filename'],
         'size': data['size'],
@@ -35,31 +36,24 @@ def create_share():
         'expiry': datetime.now() + timedelta(hours=24)
     }
 
-    print(f"[CREATE] OTP created: {otp}, Metadata: {file_metadata[otp]}")
     return jsonify({'otp': otp})
 
 @app.route('/verify', methods=['POST'])
 def verify_otp():
     otp = request.json.get('otp')
-    print(f"[VERIFY] Incoming OTP: {otp}")
-
     if not otp or otp not in file_metadata:
         return jsonify({'error': 'Invalid OTP'}), 400
 
     metadata = file_metadata[otp]
     if datetime.now() > metadata['expiry']:
         del file_metadata[otp]
-        print(f"[EXPIRED] OTP {otp} has expired and was deleted.")
         return jsonify({'error': 'Share has expired'}), 400
 
-    print(f"[VALID] OTP verified: {otp}")
     return jsonify({
         'filename': metadata['filename'],
         'size': metadata['size'],
         'type': metadata['type']
     })
-
-# ---------------- Socket.IO Events ----------------
 
 @socketio.on('connect')
 def handle_connect():
@@ -98,23 +92,19 @@ def on_ice_candidate(data):
         emit('ice-candidate', data, room=otp)
         print(f"[SOCKET] ICE candidate sent for OTP: {otp}")
 
-# ---------------- Cleanup ----------------
-
 def cleanup_expired_shares():
     while True:
-        now = datetime.now()
-        expired = [otp for otp, info in file_metadata.items() if now > info['expiry']]
-        for otp in expired:
-            print(f"[CLEANUP] Deleting expired OTP: {otp}")
+        current_time = datetime.now()
+        expired_otps = [otp for otp, info in file_metadata.items() if current_time > info['expiry']]
+        for otp in expired_otps:
             del file_metadata[otp]
-        time.sleep(3600)  # Run every hour
+        socketio.sleep(60)
 
-# Start cleanup thread in background
-cleanup_thread = threading.Thread(target=cleanup_expired_shares, daemon=True)
-cleanup_thread.start()
-
-# ---------------- Run App ----------------
+@socketio.on_error_default
+def default_error_handler(e):
+    print(f"[SOCKET] Error: {e}")
 
 if __name__ == '__main__':
+    socketio.start_background_task(cleanup_expired_shares)
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port)
