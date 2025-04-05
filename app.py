@@ -1,12 +1,13 @@
-from flask import Flask, request, render_template, jsonify
-from flask_socketio import SocketIO, emit
+from flask import Flask, request, render_template, jsonify, session
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import secrets
 from datetime import datetime, timedelta
 import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key')
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SESSION_TYPE'] = 'filesystem'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Store only OTP and metadata, not the actual file
 # Structure: {otp: {'filename': filename, 'size': size, 'type': type, 'expiry': expiry_time}}
@@ -56,29 +57,42 @@ def verify_otp():
     })
 
 # WebSocket events for signaling
+@socketio.on('connect')
+def handle_connect():
+    print("Client connected")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print("Client disconnected")
+
 @socketio.on('join')
 def on_join(data):
     otp = data.get('otp')
     if otp in file_metadata:
+        join_room(otp)
         emit('ready', {'otp': otp}, room=otp)
+        print(f"Client joined room: {otp}")
 
 @socketio.on('offer')
 def on_offer(data):
     otp = data.get('otp')
     if otp in file_metadata:
         emit('offer', data, room=otp)
+        print(f"Offer sent for OTP: {otp}")
 
 @socketio.on('answer')
 def on_answer(data):
     otp = data.get('otp')
     if otp in file_metadata:
         emit('answer', data, room=otp)
+        print(f"Answer sent for OTP: {otp}")
 
 @socketio.on('ice-candidate')
 def on_ice_candidate(data):
     otp = data.get('otp')
     if otp in file_metadata:
         emit('ice-candidate', data, room=otp)
+        print(f"ICE candidate sent for OTP: {otp}")
 
 # Cleanup expired shares periodically
 def cleanup_expired_shares():
